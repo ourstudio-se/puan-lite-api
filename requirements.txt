@@ -1,0 +1,2 @@
+strawberry-graphql[debug-server]
+puan-lite==0.1.2
