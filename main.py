@@ -222,32 +222,88 @@ class Direction(Enum):
     Positive = "POSITIVE"
 
 @strawberry.input
+class PreConfigurationInput:
+
+    proposition: ComplexPropositionInput
+    valued_variables: List[ValuedVariableInput]
+
+    def to_output_model(self) -> "PreConfiguration":
+        return PreConfiguration(
+            proposition=self.proposition.to_output_model(),
+            valued_variables=list(
+                map(
+                    lambda variable: ValuedVariable(
+                        id=variable.id,
+                        value=variable.value,
+                    ),
+                    self.valued_variables
+                )
+            )
+        )
+
+@strawberry.input
 class ConfiguratorSettingsInput:
 
     default_direction: Direction
+    preconfigurations: List[PreConfigurationInput]
 
     def configuration_settings(self) -> "ConfiguratorSettings":
         return ConfiguratorSettings(
             default_direction=self.default_direction,
+            preconfigurations=list(
+                map(
+                    lambda preconfiguration: preconfiguration.to_output_model(),
+                    self.preconfigurations
+                )
+            )
         )
+
+@strawberry.type
+class PreConfiguration:
+
+    proposition: ComplexProposition
+    valued_variables: List[ValuedVariable]
+
+    def interpretation_dict(self, interpretation: dict) -> dict:
+        polyhedron = And(self.proposition.to_puan()).to_ge_polyhedron()
+        boolean_vector = (polyhedron.A.construct(interpretation) >= 1)
+        if (polyhedron.A.dot(boolean_vector) >= polyhedron.b).all():
+            return dict(
+                map(
+                    lambda variable: (variable.id, variable.value),
+                    self.valued_variables,
+                )
+            )
+        return {}
 
 @strawberry.type
 class ConfiguratorSettings:
 
     default_direction: Direction
+    preconfigurations: List[PreConfiguration]
 
-    def interpretation_dicts(self, variables: list) -> List[Dict[str, int]]:
-        return [
-            dict(
-                zip(
-                    map(
-                        lambda variable: variable.id,
-                        variables,
+    def interpretation_dicts(self, variables: list, interpretation: dict) -> List[Dict[str, int]]:
+        return list(
+            chain(
+                [
+                    dict(
+                        zip(
+                            map(
+                                lambda variable: variable.id,
+                                variables,
+                            ),
+                            repeat(-1 if self.default_direction == Direction.Negative else 1),
+                        )
+                    )
+                ],
+                map(
+                    lambda pc: pc.interpretation_dict(
+                        interpretation,
                     ),
-                    repeat(-1 if self.default_direction == Direction.Negative else 1),
+                    self.preconfigurations,
                 )
             )
-        ]
+        )
 
 @strawberry.type
 class Configurator:
@@ -266,16 +322,19 @@ class Configurator:
         )
 
     @strawberry.field
-    def select(self, prioritation: InterpretationInput) -> List[Interpretation]:
+    def select(self, prioritization: InterpretationInput) -> List[Interpretation]:
         objective = pnd.integer_ndarray(
             np.vstack(
                 list(
                     map(
                         self.polyhedron.A.construct,
                         chain(
-                            self.settings.interpretation_dicts(self.polyhedron.A.variables),
+                            self.settings.interpretation_dicts(
+                                self.polyhedron.A.variables,
+                                prioritization.to_dict(),
+                            ),
                             [
-                                prioritation.to_dict(),
+                                prioritization.to_dict(),
                             ],
                         )
                     )
@@ -348,6 +407,13 @@ class PropositionStrawberry:
         )
 
     @strawberry.field
+    def configureFromId(self, id: str) -> Configurator:
+        return Configurator(
+            polyhedron=self.to_puan().to_ge_polyhedron(),
+            settings=temp_data[id],
+        )
+
+    @strawberry.field
     def size(self) -> int:
         return self.to_puan().to_ge_polyhedron().size
 
@@ -404,6 +470,12 @@ class Mutation:
         )
         id = hashlib.sha256(pickle.dumps(model.to_puan())).hexdigest()
         temp_data[id] = model
+        return id
+
+    @strawberry.mutation
+    def add_configuration_setting(self, settings: ConfiguratorSettingsInput) -> str:
+        id = hashlib.sha256(pickle.dumps(settings.configuration_settings())).hexdigest()
+        temp_data[id] = settings.configuration_settings()
         return id
 
 config = Config(".env")
